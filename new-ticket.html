@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Submit Support Ticket</title>
+
+  <style>
+    :root {
+      font-family: system-ui, sans-serif;
+      color: #222;
+      background: #f3f4f6;
+    }
+
+    body {
+      margin: 0;
+      padding: 2rem 1rem;
+    }
+
+    main {
+      max-width: 650px;
+      margin: 0 auto;
+      padding: 2rem;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+    }
+
+    h1 {
+      margin-top: 0;
+    }
+
+    label {
+      display: block;
+      margin-top: 1.2rem;
+      font-weight: 600;
+    }
+
+    input,
+    select,
+    textarea,
+    button {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 0.4rem;
+      padding: 0.7rem;
+      border: 1px solid #bbb;
+      border-radius: 5px;
+      font: inherit;
+    }
+
+    textarea {
+      min-height: 180px;
+      resize: vertical;
+    }
+
+    button {
+      margin-top: 1.5rem;
+      color: white;
+      background: #1769aa;
+      border: none;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #125486;
+    }
+
+    button:disabled {
+      background: #888;
+      cursor: wait;
+    }
+
+    #status {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      border-radius: 5px;
+    }
+
+    .success {
+      background: #e4f6e8;
+      color: #176b2c;
+    }
+
+    .error {
+      background: #fde8e8;
+      color: #a11;
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <h1>Submit a Support Ticket</h1>
+
+    <form id="ticketForm">
+      <label for="name">Name</label>
+      <input
+        id="name"
+        name="name"
+        type="text"
+        maxlength="120"
+        required
+        autocomplete="name"
+      >
+
+      <label for="severity">Severity</label>
+      <select id="severity" name="severity" required>
+        <option value="Low" selected>Low</option>
+        <option value="High">High</option>
+      </select>
+
+      <label for="problem">Problem</label>
+      <textarea
+        id="problem"
+        name="problem"
+        maxlength="10000"
+        required
+        placeholder="Describe the problem..."
+      ></textarea>
+
+      <button id="submitButton" type="submit">
+        Submit Ticket
+      </button>
+
+      <div id="status" role="status" aria-live="polite"></div>
+    </form>
+  </main>
+
+  <script>
+    const form = document.getElementById("ticketForm");
+    const button = document.getElementById("submitButton");
+    const statusBox = document.getElementById("status");
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      statusBox.textContent = "";
+      statusBox.className = "";
+      button.disabled = true;
+      button.textContent = "Submitting...";
+
+      const now = new Date();
+
+      const ticket = {
+        name: document.getElementById("name").value.trim(),
+        severity: document.getElementById("severity").value,
+        problem: document.getElementById("problem").value.trim(),
+
+        // Client-side time. The server should also record its own receipt time.
+        client_time_local: now.toString(),
+        client_time_iso: now.toISOString(),
+        client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        client_timezone_offset_minutes: now.getTimezoneOffset(),
+
+        // Available browser/device context.
+        user_agent: navigator.userAgent,
+        language: navigator.language,
+        screen: {
+          width: window.screen.width,
+          height: window.screen.height,
+          pixel_ratio: window.devicePixelRatio
+        },
+
+        // Only includes cookies visible to JavaScript.
+        // HttpOnly cookies are intentionally excluded by browsers.
+        cookie_string: document.cookie
+      };
+
+      try {
+        const response = await fetch("/api/tickets", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+          },
+          body: JSON.stringify(ticket)
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(result.error || `Server returned HTTP ${response.status}`);
+        }
+
+        statusBox.textContent =
+          `Ticket submitted successfully${result.ticket_id ? `: ${result.ticket_id}` : "."}`;
+        statusBox.className = "success";
+
+        form.reset();
+        document.getElementById("severity").value = "Low";
+      } catch (error) {
+        statusBox.textContent = `Submission failed: ${error.message}`;
+        statusBox.className = "error";
+      } finally {
+        button.disabled = false;
+        button.textContent = "Submit Ticket";
+      }
+    });
+  </script>
+</body>
+</html>
