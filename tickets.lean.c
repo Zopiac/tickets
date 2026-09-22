@@ -4,19 +4,10 @@
 #include <cjson/cJSON.h>
 
 #include <arpa/inet.h>
-#include <ctype.h>
-#include <errno.h>
-#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/socket.h>
 #include <time.h>
-#include <unistd.h>
-
-#include <stdint.h>
-#include <netinet/in.h>
 
 #define PORT 8080
 #define MAX_BODY 20000
@@ -151,144 +142,6 @@ static int valid_length(const char *text, size_t maximum) {
     return text && strlen(text) <= maximum;
 }
 
-static int parse_cidr(const char *text, struct sockaddr_storage *network, int *prefix_length) {
-    char buffer[INET6_ADDRSTRLEN + 8];
-    char *slash;
-    int family;
-    int max_prefix;
-
-    if (!text || strlen(text) >= sizeof(buffer))
-        return 0;
-
-    strcpy(buffer, text);
-
-    slash = strchr(buffer, '/');
-    if (!slash)
-        return 0;
-
-    *slash = '\0';
-    slash++;
-
-    char *end = NULL;
-    long prefix = strtol(slash, &end, 10);
-
-    if (*slash == '\0' || *end != '\0')
-        return 0;
-
-    struct sockaddr_in *ipv4 = (struct sockaddr_in *)network;
-    struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)network;
-
-    memset(network, 0, sizeof(*network));
-
-    if (inet_pton(AF_INET, buffer, &ipv4->sin_addr) == 1) {
-        family = AF_INET;
-        max_prefix = 32;
-        ipv4->sin_family = AF_INET;
-    } else if (inet_pton(AF_INET6, buffer, &ipv6->sin6_addr) == 1) {
-        family = AF_INET6;
-        max_prefix = 128;
-        ipv6->sin6_family = AF_INET6;
-    } else {
-        return 0;
-    }
-
-    if (prefix < 0 || prefix > max_prefix)
-        return 0;
-
-    *prefix_length = (int)prefix;
-    (void)family;
-    return 1;
-}
-
-static int normalize_cidr(const char *input, char *output, size_t output_size) {
-    struct sockaddr_storage network;
-    int prefix_length;
-
-    if (!input || !*input)
-        return 0;
-
-        // If the input already contains '/', retain it
-    if (strchr(input, '/')) {
-        if (strlen(input) >= output_size)
-            return 0;
-
-        strcpy(output, input);
-    } else {
-        // IPv6 addresses contain ':'; IPv4 addresses do not
-        const char *suffix = strchr(input, ':') ? "/128" : "/32";
-
-        if (snprintf(output, output_size, "%s%s", input, suffix)
-            >= (int)output_size)
-            return 0;
-    }
-
-    // Validate the normalized result.
-    if (!parse_cidr(output, &network, &prefix_length))
-        return 0;
-
-    return 1;
-}
-
-static int address_in_cidr(const char *address_text, const char *cidr_text) {
-    struct sockaddr_storage network;
-    struct sockaddr_storage address;
-    int prefix_length;
-
-    if (!parse_cidr(cidr_text, &network, &prefix_length))
-        return 0;
-
-    memset(&address, 0, sizeof(address));
-
-    struct sockaddr_in *address4 = (struct sockaddr_in *)&address;
-    struct sockaddr_in6 *address6 = (struct sockaddr_in6 *)&address;
-
-    if (inet_pton(AF_INET, address_text, &address4->sin_addr) == 1) {
-        address4->sin_family = AF_INET;
-    } else if (inet_pton(AF_INET6, address_text, &address6->sin6_addr) == 1) {
-        address6->sin6_family = AF_INET6;
-    } else {
-        return 0;
-    }
-
-    int network_family = network.ss_family;
-    int address_family = address.ss_family;
-
-    if (network_family != address_family)
-        return 0;
-
-    if (network_family == AF_INET) {
-        uint32_t network_bits = ntohl(((struct sockaddr_in *)&network)->sin_addr.s_addr);
-        uint32_t address_bits = ntohl(((struct sockaddr_in *)&address)->sin_addr.s_addr);
-
-        if (prefix_length == 0)
-            return 1;
-
-        uint32_t mask = 0xffffffffu << (32 - prefix_length);
-        return (network_bits & mask) == (address_bits & mask);
-    }
-
-    if (network_family == AF_INET6) {
-        const unsigned char *network_bytes = ((struct sockaddr_in6 *)&network)->sin6_addr.s6_addr;
-        const unsigned char *address_bytes = ((struct sockaddr_in6 *)&address)->sin6_addr.s6_addr;
-
-        int whole_bytes = prefix_length / 8;
-        int remaining_bits = prefix_length % 8;
-
-        if (memcmp(network_bytes, address_bytes, whole_bytes) != 0)
-            return 0;
-
-        if (remaining_bits != 0) {
-            unsigned char mask = (unsigned char)(0xff << (8 - remaining_bits));
-
-            if ((network_bytes[whole_bytes] & mask) != (address_bytes[whole_bytes] & mask))
-                return 0;
-        }
-
-        return 1;
-    }
-
-    return 0;
-}
 static int get_client_ip(struct MHD_Connection *connection, char output[INET6_ADDRSTRLEN]) {
     //const char *forwarded;
     const char *real_ip;
@@ -311,16 +164,14 @@ static int get_client_ip(struct MHD_Connection *connection, char output[INET6_AD
 
     if (address->sa_family == AF_INET) {
         const struct sockaddr_in *ipv4 = (const struct sockaddr_in *)address;
-
         return inet_ntop(AF_INET, &ipv4->sin_addr, output, INET6_ADDRSTRLEN) != NULL;
     }
 
     if (address->sa_family == AF_INET6) {
         const struct sockaddr_in6 *ipv6 = (const struct sockaddr_in6 *)address;
-
         return inet_ntop(AF_INET6, &ipv6->sin6_addr, output, INET6_ADDRSTRLEN) != NULL;
     }
-
+    
     return 0;
 }
 
@@ -350,7 +201,8 @@ static int insert_ticket(const char *body,
     const char *severity = str_field(json, "severity");
     const char *problem = str_field(json, "problem");
 
-    if (!*name || !*problem || (strcmp(severity, "Low") != 0 && strcmp(severity, "High") != 0) || !valid_length(name, 120) || !valid_length(problem, 10000)) {
+    if (!*name || !*problem || (strcmp(severity, "Low") != 0 && strcmp(severity, "High") != 0) ||
+    !valid_length(name, 120) || !valid_length(problem, 10000)) {
         *error_message = strdup("invalid name, severity, or problem");
         cJSON_Delete(json);
         return 0;
@@ -445,7 +297,14 @@ struct upload {
     size_t length;
 };
 
-static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connection, const char *url, const char *method, const char *version, const char *upload_data, size_t *upload_data_size,void **con_cls) {
+static enum MHD_Result request_handler(void *cls,
+                                       struct MHD_Connection *connection,
+                                       const char *url,
+                                       const char *method,
+                                       const char *version,
+                                       const char *upload_data,
+                                       size_t *upload_data_size,
+                                       void **con_cls) {
     (void)cls;
     (void)version;
 
@@ -521,154 +380,6 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
     return MHD_YES;
 }
 
-static void list_tickets(const char *severity, const char *from, const char *to, const char *ip_filter, const char *completed) {
-    char normalized_cidr[INET6_ADDRSTRLEN + 8];
-
-    if (ip_filter) {
-        if (!normalize_cidr(ip_filter, normalized_cidr, sizeof(normalized_cidr))) {
-            fprintf(stderr, "invalid IP address or CIDR range: %s\n", ip_filter);
-            return;
-        }
-
-        ip_filter = normalized_cidr;
-    }
-
-    char sql[2048] = "SELECT ticket_number, received_at, source_ip, severity, completed, name FROM tickets WHERE 1=1";
-
-    sqlite3_stmt *statement = NULL;
-    int parameter = 1;
-
-    if (severity)  strcat(sql, " AND severity = ?");
-    if (from)      strcat(sql, " AND received_at >= ?");
-    if (to)        strcat(sql, " AND received_at <= ?");
-    if (completed) strcat(sql, " AND completed = ?");
-
-    strcat(sql, " ORDER BY received_at DESC;");
-
-    if (sqlite3_prepare_v2(db, sql, -1, &statement, NULL) != SQLITE_OK)
-        die(sqlite3_errmsg(db));
-
-    if (severity)
-        sqlite3_bind_text(statement, parameter++, severity, -1, SQLITE_TRANSIENT);
-
-    if (from)
-        sqlite3_bind_text(statement, parameter++, from, -1, SQLITE_TRANSIENT);
-
-    if (to)
-        sqlite3_bind_text(statement, parameter++, to, -1, SQLITE_TRANSIENT);
-
-    if (completed)
-        sqlite3_bind_int(statement, parameter++, atoi(completed));
-
-    printf("%-16s %-20s %-39s %-8s %-5s %s\n", "TICKET", "RECEIVED", "IP", "SEVERITY", "DONE", "NAME");
-
-    while (sqlite3_step(statement) == SQLITE_ROW) {
-        const char *ticket = (const char *)sqlite3_column_text(statement, 0);
-        const char *received = (const char *)sqlite3_column_text(statement, 1);
-        const char *source_ip = (const char *)sqlite3_column_text(statement, 2);
-        const char *severity_value = (const char *)sqlite3_column_text(statement, 3);
-        int done = sqlite3_column_int(statement, 4);
-        const char *name = (const char *)sqlite3_column_text(statement, 5);
-
-        if (ip_filter && !address_in_cidr(source_ip, ip_filter))
-            continue;
-
-        printf("%-16s %-20s %-39s %-8s %-5s %s\n", ticket, received, source_ip, severity_value, done ? "yes" : "no", name);
-    }
-
-    sqlite3_finalize(statement);
-}
-
-static void show_ticket(const char *ticket_number) {
-    const char *sql = "SELECT ticket_number, received_at, source_ip,"
-                      "completed, name, severity, problem,"
-                      "client_time_local, client_time_iso, client_timezone,"
-                      "client_timezone_offset_minutes, user_agent, language,"
-                      "screen_width, screen_height, pixel_ratio, cookie_string "
-                      "FROM tickets WHERE ticket_number = ?";
-
-    sqlite3_stmt *statement = NULL;
-
-    if (sqlite3_prepare_v2(db, sql, -1, &statement, NULL) != SQLITE_OK)
-        die(sqlite3_errmsg(db));
-
-    sqlite3_bind_text(statement, 1, ticket_number, -1, SQLITE_TRANSIENT);
-
-    if (sqlite3_step(statement) != SQLITE_ROW) {
-        fprintf(stderr, "ticket not found: %s\n", ticket_number);
-        sqlite3_finalize(statement);
-        return;
-    }
-
-#define TEXT_COLUMN(index) \
-    ((const char *)sqlite3_column_text(statement, index))
-
-    printf("Ticket:             %s\n", TEXT_COLUMN(0));
-    printf("Received:           %s\n", TEXT_COLUMN(1));
-    printf("Source IP:          %s\n", TEXT_COLUMN(2));
-    printf("Completed:          %s\n", sqlite3_column_int(statement, 3) ? "yes" : "no");
-    printf("Name:               %s\n", TEXT_COLUMN(4));
-    printf("Severity:           %s\n", TEXT_COLUMN(5));
-
-    printf("\nProblem:\n%s\n", TEXT_COLUMN(6));
-
-    printf("\nClient information:\n");
-    printf("  Local time:       %s\n", TEXT_COLUMN(7));
-    printf("  ISO time:         %s\n", TEXT_COLUMN(8));
-    printf("  Time zone:        %s\n", TEXT_COLUMN(9));
-    printf("  UTC offset:       %d minutes\n", sqlite3_column_int(statement, 10));
-    printf("  User agent:       %s\n", TEXT_COLUMN(11));
-    printf("  Language:         %s\n", TEXT_COLUMN(12));
-    printf("  Screen:           %dx%d\n", sqlite3_column_int(statement, 13), sqlite3_column_int(statement, 14));
-    printf("  Pixel ratio:      %.2f\n", sqlite3_column_double(statement, 15));
-
-    printf("\nCookie string:\n%s\n", TEXT_COLUMN(16));
-
-#undef TEXT_COLUMN
-
-    sqlite3_finalize(statement);
-}
-
-static void complete_ticket(const char *ticket_number) {
-    sqlite3_stmt *statement = NULL;
-
-    const char *sql = "UPDATE tickets SET completed=1 WHERE ticket_number=?";
-
-    if (sqlite3_prepare_v2(db, sql, -1, &statement, NULL) != SQLITE_OK)
-        die(sqlite3_errmsg(db));
-
-    sqlite3_bind_text(statement, 1, ticket_number, -1, SQLITE_TRANSIENT);
-
-    if (sqlite3_step(statement) != SQLITE_DONE)
-        die(sqlite3_errmsg(db));
-
-    if (sqlite3_changes(db) == 0)
-        fprintf(stderr, "ticket not found: %s\n", ticket_number);
-    else
-        printf("marked ticket %s complete\n", ticket_number);
-
-    sqlite3_finalize(statement);
-}
-
-static void usage(const char *program) {
-    fprintf(stderr,
-        "Usage:\n"
-        "  %s serve [port]\n"
-        "  %s show TICKET_NUMBER\n"
-        "  %s list [options]\n"
-        "  %s complete TICKET_NUMBER\n"
-        "\n"
-        "List options:\n"
-        "  --severity Low|High (lol case)\n"
-        "  --from ISO_TIMESTAMP\n"
-        "  --to ISO_TIMESTAMP\n"
-        "  --ip ADDRESS</range>\n"
-        "  --completed 0|1\n",
-        program, program, program, program);
-
-    exit(EXIT_FAILURE);
-}
-
 int main(int argc, char **argv) {
     init_db();
 
@@ -687,42 +398,6 @@ int main(int argc, char **argv) {
             pause();
 
         MHD_stop_daemon(daemon);
-    } else if (argc >= 2 && strcmp(argv[1], "complete") == 0) {
-        if (argc != 3)
-            usage(argv[0]);
-
-        complete_ticket(argv[2]);
-    } else if (argc >= 2 && strcmp(argv[1], "list") == 0) {
-        const char *severity = NULL;
-        const char *from = NULL;
-        const char *to = NULL;
-        const char *ip_filter = NULL;
-        const char *completed = NULL;
-
-        for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "--severity") == 0 && i + 1 < argc)
-                severity = argv[++i];
-            else if (strcmp(argv[i], "--from") == 0 && i + 1 < argc)
-                from = argv[++i];
-            else if (strcmp(argv[i], "--to") == 0 && i + 1 < argc)
-                to = argv[++i];
-            else if (strcmp(argv[i], "--ip") == 0 && i + 1 < argc)
-                ip_filter = argv[++i];
-            else if (strcmp(argv[i], "--completed") == 0 && i + 1 < argc)
-                completed = argv[++i];
-            else
-                usage(argv[0]);
-        }
-
-        list_tickets(severity, from, to, ip_filter, completed);
-    } else if (argc >= 2 && strcmp(argv[1], "show") == 0) {
-        if (argc != 3)
-            usage(argv[0]);
-
-        show_ticket(argv[2]);
-
-    } else {
-        usage(argv[0]);
     }
 
     sqlite3_close(db);
